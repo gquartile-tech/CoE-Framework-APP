@@ -1,12 +1,11 @@
 # rules_engine.py
 from __future__ import annotations
 
-import re  # ✅ FIX (3): needed for C038 regex
+import re  # needed for C038 regex
 from datetime import timedelta
 from typing import Callable, Dict, Optional, Tuple, List
 
 import pandas as pd
-
 import numpy as np
 
 import config as cfg
@@ -43,6 +42,13 @@ def partial(note: str = "") -> ControlResult:
 def expected_tab_label(dataset_key: str) -> str:
     prefixes = getattr(cfg, "TAB_CANDIDATES", {}).get(dataset_key, [])
     return prefixes[0] if prefixes else dataset_key
+
+
+def obs(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return text if text.startswith("Observed:") else f"Observed: {text}"
 
 
 # =========================================================
@@ -104,13 +110,11 @@ def _get_cols_norm_map(df: pd.DataFrame) -> Dict[str, str]:
 def find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     cols_norm = _get_cols_norm_map(df)
 
-    # exact matches
     for cand in candidates:
         cn = norm(cand)
         if cn in cols_norm:
             return cols_norm[cn]
 
-    # substring matches
     for cand in candidates:
         cn = norm(cand)
         for k, orig in cols_norm.items():
@@ -171,13 +175,11 @@ def ds(
       - avoid re-reading/parsing the same dataset across multiple controls
       - cache is stored on ctx as _dataset_cache
     """
-    # Create cache dict on ctx (safe monkey-patch)
     cache = getattr(ctx, "_dataset_cache", None)
     if cache is None:
         cache = {}
         setattr(ctx, "_dataset_cache", cache)
 
-    # 1) try primary dataset_key from cache
     ck1 = ("ds", str(dataset_key))
     if ck1 in cache:
         sh, df = cache[ck1]
@@ -185,7 +187,6 @@ def ds(
         sh, df = get_dataset(ctx, dataset_key)
         cache[ck1] = (sh, df)
 
-    # 2) fallback if missing
     if (df is None) and fallback_tab_prefix:
         ck2 = ("ds", str(fallback_tab_prefix))
         if ck2 in cache:
@@ -230,11 +231,10 @@ def any_rows(ctx: DatabricksContext, dataset_key: str, fallback_tab_prefix: Opti
         return ok() if no_data_ok else flag(note_data_missing(tab, "Rows"))
 
     n = int(len(df.index))
-    return flag(f"{tab}: {n} rows found (presence-based trigger).")
+    return flag(obs(f"{n} active row(s) were found in {tab}, indicating that this condition is currently present."))
 
 
 def _normalize_pct(v: float) -> float:
-    # normalize decimals (0.16 -> 16)
     return v * 100.0 if 0 < v <= 1.0 else float(v)
 
 
@@ -263,7 +263,7 @@ def eval_C001(ctx: DatabricksContext) -> ControlResult:
     if df is None or df.empty:
         return ok()
     if not ctx.ref_date or not col_date:
-        return ok()  # Mapping v8: OK if no data; treat missing date as no-eval
+        return ok()
 
     tmp = df.copy()
     tmp["_dt"] = pd.to_datetime(tmp[col_date], errors="coerce")
@@ -284,10 +284,10 @@ def eval_C001(ctx: DatabricksContext) -> ControlResult:
 
     g90 = min_gap_days(90)
     if g90 is not None and g90 < 14:
-        return flag(f"Min gap between ACoS changes in last 90d = {g90} days (<14).")
+        return flag(obs(f"ACoS changes were made too frequently in the last 90 days. Minimum gap was {g90} days, below the 14-day threshold."))
     g180 = min_gap_days(180)
     if g180 is not None and g180 < 14:
-        return partial(f"Min gap between ACoS changes in last 180d = {g180} days (<14).")
+        return partial(obs(f"ACoS changes were relatively frequent in the last 180 days. Minimum gap was {g180} days, below the 14-day threshold."))
     return ok()
 
 
@@ -308,7 +308,7 @@ def eval_C002(ctx: DatabricksContext) -> ControlResult:
         return ok()
     cutoff_90 = pd.Timestamp(ctx.ref_date - timedelta(days=90))
     changes_90 = int((dts >= cutoff_90).sum())
-    return flag(f"ACoS target changes in last 90d: {changes_90} (>5).") if changes_90 > 5 else ok()
+    return flag(obs(f"ACoS target was changed {changes_90} times in the last 90 days, above the limit of 5 changes.")) if changes_90 > 5 else ok()
 
 
 def eval_C003(ctx: DatabricksContext) -> ControlResult:
@@ -330,7 +330,6 @@ def eval_C003(ctx: DatabricksContext) -> ControlResult:
     if tmp.empty or len(tmp.index) < 2:
         return ok()
 
-    # window: same as mapping for ACoS changes: last 90 days
     cutoff_90 = pd.Timestamp(ctx.ref_date - timedelta(days=90))
     tmp = tmp[tmp["_dt"] >= cutoff_90].copy()
     tmp = tmp.sort_values("_dt")
@@ -341,10 +340,10 @@ def eval_C003(ctx: DatabricksContext) -> ControlResult:
 
     for old, new in zip(vals[:-1], vals[1:]):
         if old == 0:
-            return flag("Old iACoS value is 0; cannot compute relative magnitude.")
+            return flag(obs("The previous iACoS value was 0, so relative change magnitude could not be calculated."))
         mag = abs((new - old) / old) * 100.0
         if mag < 5.0 or mag > 25.0:
-            return flag(f"Relative change magnitude {mag:.2f}% out of range (acceptable 5%–25%).")
+            return flag(obs(f"ACoS change magnitude was outside the acceptable range. Relative change was {mag:.2f}%, versus the expected 5%–25% band."))
     return ok()
 
 
@@ -354,7 +353,7 @@ def eval_C004(ctx: DatabricksContext) -> ControlResult:
     if miss:
         return miss
     v = as_float(df.iloc[0][col])
-    return ok() if v is not None and abs(v - 1.0) < 1e-9 else flag(f"QuartileFactor={v} (expected 1.0).")
+    return ok() if v is not None and abs(v - 1.0) < 1e-9 else flag(obs(f"QuartileFactor is not aligned with the expected setup. Current value is {v}; expected 1.0."))
 
 
 def eval_C005(ctx: DatabricksContext) -> ControlResult:
@@ -362,7 +361,7 @@ def eval_C005(ctx: DatabricksContext) -> ControlResult:
     if miss:
         return miss
     v = as_float(df.iloc[0][col])
-    return ok() if v is not None and abs(v - 1.0) < 1e-9 else flag(f"CurrentEpisolon={v} (expected 1.0).")
+    return ok() if v is not None and abs(v - 1.0) < 1e-9 else flag(obs(f"CurrentEpisolon is not aligned with the expected setup. Current value is {v}; expected 1.0."))
 
 
 # ---- Presence-based overrides/flags ----
@@ -397,7 +396,7 @@ def eval_C008(ctx: DatabricksContext) -> ControlResult:
 
     if (tmp["_status"] != "expired").any():
         n = int((tmp["_status"] != "expired").sum())
-        return flag(f"Timeframe boost non-expired rows={n}.")
+        return flag(obs(f"{n} timeframe boost row(s) are still active and not marked as expired."))
     return ok()
 
 
@@ -423,12 +422,6 @@ _NEGATIVE_EXCEPTIONS = [
 
 
 def _clean_cell_to_str(x) -> str:
-    """
-    Robust string cleaner for Excel-loaded cells:
-      - preserves real text
-      - converts NaN/None/"nan"/"none" to ""
-      - trims whitespace
-    """
     if x is None:
         return ""
     try:
@@ -443,10 +436,6 @@ def _clean_cell_to_str(x) -> str:
 
 
 def _is_exception_negative(term: str) -> bool:
-    """
-    Exception is substring-based (as requested):
-    if the negative contains any exception token anywhere -> exception.
-    """
     t = _clean_cell_to_str(term).lower()
     if not t:
         return False
@@ -471,14 +460,11 @@ def eval_C011(ctx: DatabricksContext) -> ControlResult:
         return ok()
 
     tmp = df.copy()
-
-    # FIX: clean negatives safely (avoid "nan" strings)
     tmp["_neg"] = tmp[neg].apply(_clean_cell_to_str)
     tmp = tmp[tmp["_neg"] != ""]
     if tmp.empty:
         return ok()
 
-    # FIX: clean product safely (avoid "nan" strings misclassifying as product-level)
     if prod:
         tmp["_prod"] = tmp[prod].apply(_clean_cell_to_str)
         acct = tmp[tmp["_prod"] == ""].copy()
@@ -490,7 +476,7 @@ def eval_C011(ctx: DatabricksContext) -> ControlResult:
 
     non_exc = [x for x in acct["_neg"].tolist() if not _is_exception_negative(x)]
     if non_exc:
-        return flag(f"Non-exception account-level negatives found: {len(non_exc)}.")
+        return flag(obs(f"{len(non_exc)} non-exception account-level negative keyword(s) were found."))
     return ok()
 
 
@@ -512,8 +498,6 @@ def eval_C012(ctx: DatabricksContext) -> ControlResult:
         return ok()
 
     tmp = df.copy()
-
-    # FIX: clean negatives safely (avoid "nan" strings)
     tmp["_neg"] = tmp[neg].apply(_clean_cell_to_str)
     tmp = tmp[tmp["_neg"] != ""]
     if tmp.empty:
@@ -522,7 +506,6 @@ def eval_C012(ctx: DatabricksContext) -> ControlResult:
     if not prod:
         return ok()
 
-    # FIX: clean product safely (avoid "nan" strings)
     tmp["_prod"] = tmp[prod].apply(_clean_cell_to_str)
     prod_df = tmp[tmp["_prod"] != ""].copy()
     if prod_df.empty:
@@ -530,8 +513,9 @@ def eval_C012(ctx: DatabricksContext) -> ControlResult:
 
     non_exc = [x for x in prod_df["_neg"].tolist() if not _is_exception_negative(x)]
     if non_exc:
-        return flag(f"Non-exception product-level negatives found: {len(non_exc)}.")
+        return flag(obs(f"{len(non_exc)} non-exception product-level negative keyword(s) were found."))
     return ok()
+
 
 # ---- Product Tag Completeness ----
 def eval_C013(ctx: DatabricksContext) -> ControlResult:
@@ -558,7 +542,7 @@ def eval_C013(ctx: DatabricksContext) -> ControlResult:
         asin_has_values = (df[asin_col].astype(str).fillna("").str.strip() != "").any()
         tag1_has_values = (df[tag1_col].astype(str).fillna("").str.strip() != "").any()
         if asin_has_values and not tag1_has_values:
-            return flag("Tag1 column present but no tags assigned to any ASIN.")
+            return flag(obs("Tag1 column is present, but no ASINs have Tag1 assigned."))
 
     if not active:
         return ok()
@@ -574,9 +558,9 @@ def eval_C013(ctx: DatabricksContext) -> ControlResult:
     missing_pct = (missing / total) * 100.0 if total else 0.0
 
     if missing_pct >= 25.0:
-        return flag(f"Missing tags {missing_pct:.2f}% (>=25%).")
+        return flag(obs(f"Tag completeness is low. {missing_pct:.2f}% of required tag fields are missing, above the 25% threshold."))
     if missing_pct >= 10.0:
-        return partial(f"Missing tags {missing_pct:.2f}% (>=10% and <25%).")
+        return partial(obs(f"Tag completeness is below target. {missing_pct:.2f}% of required tag fields are missing."))
     return ok()
 
 
@@ -591,7 +575,7 @@ def eval_C014(ctx: DatabricksContext) -> ControlResult:
     n = as_int(df.iloc[0][total_terms])
     if n is None:
         return flag(note_data_missing(sh or expected_tab_label("30_Branded_and_Competitor_Terms"), "Total_Terms"))
-    return ok() if n >= 1 else flag(f"Total_Terms={n} (<1) on Row7.")
+    return ok() if n >= 1 else flag(obs(f"Total branded/competitor terms on Row 7 is {n}, below the minimum of 1."))
 
 
 def eval_C015(ctx: DatabricksContext) -> ControlResult:
@@ -605,9 +589,9 @@ def eval_C015(ctx: DatabricksContext) -> ControlResult:
     if n is None:
         return flag(note_data_missing(sh or expected_tab_label("30_Branded_and_Competitor_Terms"), "Total_Terms (Row8)"))
     if n == 0:
-        return flag("Total_Terms=0 on Row8.")
+        return flag(obs("Total branded/competitor terms on Row 8 is 0."))
     if 1 <= n <= 2:
-        return partial(f"Total_Terms={n} on Row8 (1–2).")
+        return partial(obs(f"Total branded/competitor terms on Row 8 is {n}, which is below the preferred level."))
     return ok()
 
 
@@ -626,7 +610,7 @@ def eval_C016(ctx: DatabricksContext) -> ControlResult:
         return flag(note_data_missing(sh or expected_tab_label("26_Unmanaged_ASIN"), "Unmanaged_End_Date"))
     if bool((end_dates.dt.date > ctx.ref_date).any()):
         n = int((end_dates.dt.date > ctx.ref_date).sum())
-        return flag(f"Unmanaged ASIN end_date > ref_date rows={n}.")
+        return flag(obs(f"{n} unmanaged ASIN row(s) have an end date after the reference date, so they are still active."))
     return ok()
 
 
@@ -644,7 +628,7 @@ def eval_C017(ctx: DatabricksContext) -> ControlResult:
         return flag(note_data_missing(sh or expected_tab_label("28_Unmanaged_Budget"), "Unmanaged_End_Date"))
     if bool((end_dates.dt.date > ctx.ref_date).any()):
         n = int((end_dates.dt.date > ctx.ref_date).sum())
-        return flag(f"Unmanaged Budget end_date > ref_date rows={n}.")
+        return flag(obs(f"{n} unmanaged budget row(s) have an end date after the reference date, so they are still active."))
     return ok()
 
 
@@ -662,7 +646,7 @@ def eval_C018(ctx: DatabricksContext) -> ControlResult:
         return flag(note_data_missing(sh or expected_tab_label("31_Unmanaged_campaigns"), "Unmanaged_End_Date"))
     if bool((end_dates.dt.date > ctx.ref_date).any()):
         n = int((end_dates.dt.date > ctx.ref_date).sum())
-        return flag(f"Unmanaged Campaigns end_date > ref_date rows={n}.")
+        return flag(obs(f"{n} unmanaged campaign row(s) have an end date after the reference date, so they are still active."))
     return ok()
 
 
@@ -680,7 +664,7 @@ def eval_C019(ctx: DatabricksContext) -> ControlResult:
         return flag(note_data_missing(sh or expected_tab_label("32_Unmanaged_Campaigns_Budget_O"), "Unmanaged_End_Date"))
     if bool((end_dates.dt.date > ctx.ref_date).any()):
         n = int((end_dates.dt.date > ctx.ref_date).sum())
-        return flag(f"Unmanaged Campaign Budgets end_date > ref_date rows={n}.")
+        return flag(obs(f"{n} unmanaged campaign budget row(s) have an end date after the reference date, so they are still active."))
     return ok()
 
 
@@ -702,7 +686,7 @@ def eval_C021(ctx: DatabricksContext) -> ControlResult:
     if elig.empty:
         return ok()
     flags = elig[is_daily].apply(as_bool).dropna()
-    return flag("Managed portfolio(s) with IsDailyVamBaseline=True detected.") if (not flags.empty and flags.any()) else ok()
+    return flag(obs("At least one managed portfolio has IsDailyVamBaseline enabled.")) if (not flags.empty and flags.any()) else ok()
 
 
 def eval_C022(ctx: DatabricksContext) -> ControlResult:
@@ -722,8 +706,8 @@ def eval_C022(ctx: DatabricksContext) -> ControlResult:
     if all(v is False for v in vals):
         return ok()
     if all(v is True for v in vals):
-        return partial("All managed portfolios have IsTargetACoS=True.")
-    return flag("Mixed IsTargetACoS values across managed portfolios (both True and False).")
+        return partial(obs("All managed portfolios have IsTargetACoS enabled."))
+    return flag(obs("Managed portfolios have mixed IsTargetACoS settings, with both enabled and disabled values present."))
 
 
 def eval_C023(ctx: DatabricksContext) -> ControlResult:
@@ -743,8 +727,8 @@ def eval_C023(ctx: DatabricksContext) -> ControlResult:
     if all(v is False for v in vals):
         return ok()
     if all(v is True for v in vals):
-        return partial("All managed portfolios have IsBudgetCap=True.")
-    return flag("Mixed IsBudgetCap values across managed portfolios (both True and False).")
+        return partial(obs("All managed portfolios have IsBudgetCap enabled."))
+    return flag(obs("Managed portfolios have mixed IsBudgetCap settings, with both enabled and disabled values present."))
 
 
 # ---- Seller Params (continued) ----
@@ -755,7 +739,7 @@ def eval_C024(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "SelfService"))
-    return flag("SelfService=True.") if b is True else ok()
+    return flag(obs("SelfService is enabled, but it should be disabled.")) if b is True else ok()
 
 
 def eval_C025(ctx: DatabricksContext) -> ControlResult:
@@ -765,7 +749,7 @@ def eval_C025(ctx: DatabricksContext) -> ControlResult:
     v = as_float(df.iloc[0][col])
     if v is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "MinBid"))
-    return ok() if (0.02 <= v <= 0.15) else flag(f"MinBid={v} (expected 0.02–0.15).")
+    return ok() if (0.02 <= v <= 0.15) else flag(obs(f"MinBid is outside the expected range. Current value is {v}, versus the expected 0.02–0.15 range."))
 
 
 def eval_C026(ctx: DatabricksContext) -> ControlResult:
@@ -778,8 +762,8 @@ def eval_C026(ctx: DatabricksContext) -> ControlResult:
     if abs(v - 25.00) <= 1e-6:
         return ok()
     if v > 25.00:
-        return partial(f"MaxConversionRate={v} (>25).")
-    return flag(f"MaxConversionRate={v} (<25).")
+        return partial(obs(f"MaxConversionRate is above the expected level. Current value is {v}, versus the expected 25.00 baseline."))
+    return flag(obs(f"MaxConversionRate is below the expected level. Current value is {v}, versus the expected 25.00 baseline."))
 
 
 def eval_C027(ctx: DatabricksContext) -> ControlResult:
@@ -795,7 +779,7 @@ def eval_C027(ctx: DatabricksContext) -> ControlResult:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "Promote/Negate"))
     if abs(v1) < 1e-9 and abs(v2) < 1e-9:
         return ok()
-    return flag(f"PromoteKeywordMinClicks={v1}, NegateKeywordMinClicks={v2} (expected both 0).")
+    return flag(obs(f"PromoteKeywordMinClicks and NegateKeywordMinClicks are not aligned with the expected setup. Current values are {v1} and {v2}; both should be 0."))
 
 
 def eval_C028(ctx: DatabricksContext) -> ControlResult:
@@ -805,7 +789,7 @@ def eval_C028(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "BudgetManagement"))
-    return ok() if b is True else flag(f"BudgetManagement={b} (expected True).")
+    return ok() if b is True else flag(obs("BudgetManagement is disabled, but it should be enabled."))
 
 
 def eval_C029(ctx: DatabricksContext) -> ControlResult:
@@ -815,7 +799,7 @@ def eval_C029(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "PlacementModifierManagement"))
-    return ok() if b is True else flag(f"PlacementModifierManagement={b} (expected True).")
+    return ok() if b is True else flag(obs("PlacementModifierManagement is disabled, but it should be enabled."))
 
 
 def eval_C030(ctx: DatabricksContext) -> ControlResult:
@@ -825,7 +809,7 @@ def eval_C030(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "MktStreamHourlyBidAdjustments"))
-    return ok() if b is True else flag(f"MktStreamHourlyBidAdjustments={b} (expected True).")
+    return ok() if b is True else flag(obs("MktStreamHourlyBidAdjustments is disabled, but it should be enabled."))
 
 
 def eval_C031(ctx: DatabricksContext) -> ControlResult:
@@ -835,7 +819,7 @@ def eval_C031(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "AutomaticallyImportCampaigns"))
-    return flag("AutomaticallyImportCampaigns=True.") if b is True else ok()
+    return flag(obs("AutomaticallyImportCampaigns is enabled, but it should be disabled.")) if b is True else ok()
 
 
 def eval_C032(ctx: DatabricksContext) -> ControlResult:
@@ -845,7 +829,7 @@ def eval_C032(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "StopAudienceAutoLink"))
-    return flag("StopAudienceAutoLink=True.") if b is True else ok()
+    return flag(obs("StopAudienceAutoLink is enabled, but it should be disabled.")) if b is True else ok()
 
 
 def eval_C033(ctx: DatabricksContext) -> ControlResult:
@@ -855,7 +839,7 @@ def eval_C033(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "IsB2bPlacementManagement"))
-    return ok() if b is True else flag(f"IsB2bPlacementManagement={b} (expected True).")
+    return ok() if b is True else flag(obs("IsB2bPlacementManagement is disabled, but it should be enabled."))
 
 
 def eval_C034(ctx: DatabricksContext) -> ControlResult:
@@ -865,7 +849,7 @@ def eval_C034(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "HasDisplayPromote"))
-    return ok() if b is True else flag("HasDisplayPromote=False (expected True).")
+    return ok() if b is True else flag(obs("HasDisplayPromote is disabled, but it should be enabled."))
 
 
 def eval_C035(ctx: DatabricksContext) -> ControlResult:
@@ -875,19 +859,13 @@ def eval_C035(ctx: DatabricksContext) -> ControlResult:
     b = as_bool(df.iloc[0][col])
     if b is None:
         return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "ChangeSBV"))
-    return ok() if b is True else flag(f"ChangeSBV={b} (expected True).")
+    return ok() if b is True else flag(obs("ChangeSBV is disabled, but it should be enabled."))
 
 
 # ---- RBO ----
 def eval_C036(ctx: DatabricksContext) -> ControlResult:
     """
     Tab: 33_RBO_Configuration_Insights
-
-    FLAG if any RBO rule exists:
-      - Data_Type (Col A) == "Rules"
-      - and Rule_Name (Col F) OR Setting_Value (Col D) is nonblank
-
-    OK if tab empty OR no rules found.
     """
     sh, df = ds(ctx, "RBO_CONFIG", "33_RBO_Configuration_Insights")
     if df is None or df.empty:
@@ -895,13 +873,12 @@ def eval_C036(ctx: DatabricksContext) -> ControlResult:
 
     tab = sh or expected_tab_label("33_RBO_Configuration_Insights")
 
-    # Require at least cols A..F
     if df.shape[1] < 6:
         return flag(note_data_missing(tab, "Data_Type/Setting_Value/Rule_Name"))
 
-    data_type_col = df.columns[0]    # A
-    setting_val_col = df.columns[3]  # D
-    rule_name_col = df.columns[5]    # F
+    data_type_col = df.columns[0]
+    setting_val_col = df.columns[3]
+    rule_name_col = df.columns[5]
 
     tmp = df.copy()
     tmp["_dtype"] = tmp[data_type_col].astype(str).fillna("").str.strip().str.lower()
@@ -915,7 +892,7 @@ def eval_C036(ctx: DatabricksContext) -> ControlResult:
     n = int(len(rules.index))
     examples = rules["_rulename"].replace("", np.nan).dropna().head(3).tolist()
     ex_txt = ", ".join(examples) if examples else "Rule_Name not provided"
-    return flag(f"{tab}: {n} RBO rule(s) found. Examples: {ex_txt}.")
+    return flag(obs(f"{n} RBO rule(s) were found in {tab}. Examples: {ex_txt}."))
 
 
 # ---- SPT Coverage ----
@@ -942,9 +919,9 @@ def eval_C037(ctx: DatabricksContext) -> ControlResult:
     spt = int(as_int(rows[campaigns].dropna().iloc[0]) or 0) if not rows.empty else 0
 
     if spt == 0:
-        return flag("No SPT campaigns.")
+        return flag(obs("No SPT campaigns were found."))
     if req > 0 and spt < req:
-        return partial(f"SPT campaigns ({spt}) < required categories ({req}).")
+        return partial(obs(f"SPT campaign coverage is below target. There are {spt} SPT campaigns versus {req} required categories."))
     return ok()
 
 
@@ -955,9 +932,6 @@ def eval_C038(ctx: DatabricksContext) -> ControlResult:
       - AvgCPC < 0.50 (03 KPI B10)
       - ASIN_count > 200 (count ASINs in 14 col D)
       - ACoS_target < 15% (41 U7 row7)
-    If any condition missing => WATM alone OK.
-    Detect WATM from QT subtype table (10) CampaignSubType=='WATM'.
-    Detect CatchAll by CampaignName patterns in campaign report (08).
     """
     sh10, df10 = ds(ctx, "CAMPAIGNS_BY_TYPE", "10_Campaigns_Grouped_by_QT_Camp")
     sh08, df08 = ds(ctx, "CAMPAIGN_REPORT", "08_Campaign_Report")
@@ -1034,15 +1008,15 @@ def eval_C038(ctx: DatabricksContext) -> ControlResult:
     if not required:
         if watm > 0 or catchall:
             if catchall and watm == 0:
-                return partial("CatchAll present but not required; WATM missing.")
+                return partial(obs("CatchAll is present even though it is not required, and WATM is missing."))
             return ok()
-        return flag("Neither WATM nor CatchAll detected.")
+        return flag(obs("Neither WATM nor CatchAll was detected."))
 
     if catchall:
         return ok()
     if watm > 0 and not catchall:
-        return partial("CatchAll required but only WATM detected.")
-    return flag("CatchAll required but missing (and no WATM).")
+        return partial(obs("CatchAll is required, but only WATM was detected."))
+    return flag(obs("CatchAll is required but missing, and no WATM campaign was detected."))
 
 
 # ---- ATM Coverage for Top Sellers ----
@@ -1056,7 +1030,6 @@ def eval_C039(ctx: DatabricksContext) -> ControlResult:
     tier = find_col(df, ["tier"])
     atm_spend = find_col(df, ["atm_spend", "atm spend", "atmspend", "atm"])
 
-    # This control is ATM-based -> require ATM_Spend
     if not asin or not orders or not atm_spend:
         missing = []
         if not asin:
@@ -1079,21 +1052,20 @@ def eval_C039(ctx: DatabricksContext) -> ControlResult:
     tmp["_orders_per_day"] = tmp["_orders"] / float(days)
     tmp["_atm"] = tmp[atm_spend].apply(as_float).fillna(0.0)
 
-    # PARTIAL: low-velocity ASINs still receiving ATM spend
     cond_partial = (tmp["_orders_per_day"] < 2.0) & (tmp["_atm"] > 0.0)
     if cond_partial.any():
         n = int(cond_partial.sum())
-        return partial(f"{n} ASIN(s) with <2 orders/day have ATM spend > 0.")
+        return partial(obs(f"{n} ASIN(s) with fewer than 2 orders per day still have ATM spend active."))
 
-    # FLAG: Tier 30 + high velocity but no ATM spend (only if Tier exists)
     if tier:
         tmp["_tier"] = tmp[tier].apply(as_int)
         cond_flag = (tmp["_tier"] == 30) & (tmp["_orders_per_day"] > 2.0) & (tmp["_atm"] == 0.0)
         if cond_flag.any():
             n = int(cond_flag.sum())
-            return flag(f"{n} Tier 30 ASIN(s) with >2 orders/day have ATM spend = 0.")
+            return flag(obs(f"{n} Tier 30 ASIN(s) with more than 2 orders per day have no ATM spend assigned."))
 
     return ok()
+
 
 # ---- BA → BAK Translation ----
 def eval_C040(ctx: DatabricksContext) -> ControlResult:
@@ -1116,9 +1088,9 @@ def eval_C040(ctx: DatabricksContext) -> ControlResult:
     bak = count("BAK")
 
     if ba > 0 and bak == 0:
-        return flag(f"BA campaigns={ba} but BAK campaigns=0.")
+        return flag(obs(f"BA campaigns are active ({ba}), but no BAK campaigns were found."))
     if ba > 0 and bak > 0 and ba > bak:
-        return partial(f"BA campaigns={ba} > BAK campaigns={bak}.")
+        return partial(obs(f"BA campaign count ({ba}) is higher than BAK campaign count ({bak})."))
     return ok()
 
 
@@ -1133,32 +1105,26 @@ def eval_C041(ctx: DatabricksContext) -> ControlResult:
     if not cat or not spend_pct:
         return flag(note_data_missing(sh or expected_tab_label("12_Search_Terms_by_Category"), "KeywordCategory/Spend_Pct"))
 
-    # Branded row (case-insensitive exact match)
     rows = df[df[cat].astype(str).str.strip().str.lower() == "branded"]
     if rows.empty:
-        return flag("Branded row missing.")
+        return flag(obs("Branded row is missing."))
 
     v = as_float(rows[spend_pct].dropna().iloc[0]) if not rows[spend_pct].dropna().empty else None
     if v is None:
-        return flag("Branded spend pct missing.")
+        return flag(obs("Branded spend share is missing."))
 
     v = _normalize_pct(v)
 
-    # NEW THRESHOLDS:
-    # FLAG: <1% OR >40%
-    # PARTIAL: 1–<5% OR 25–40% (inclusive on 40, exclusive on 25? user said 25% till 40%)
-    # OK: 5–25% (inclusive on 25)
     if v < 1.0:
-        return flag(f"Branded spend {v:.2f}% (<1%).")
+        return flag(obs(f"Branded spend share is too low at {v:.2f}%, below the 1% minimum threshold."))
     if v > 40.0:
-        return flag(f"Branded spend {v:.2f}% (>40%).")
-
+        return flag(obs(f"Branded spend share is too high at {v:.2f}%, above the 40% maximum threshold."))
     if 1.0 <= v < 5.0:
-        return partial(f"Branded spend {v:.2f}% (1–<5%).")
+        return partial(obs(f"Branded spend share is low at {v:.2f}%, below the preferred 5% level."))
     if 25.0 < v <= 40.0:
-        return partial(f"Branded spend {v:.2f}% (>25–40%).")
-
+        return partial(obs(f"Branded spend share is elevated at {v:.2f}%, above the preferred 25% level."))
     return ok()
+
 
 # ---- SB Spend Share ----
 def eval_C042(ctx: DatabricksContext) -> ControlResult:
@@ -1171,12 +1137,12 @@ def eval_C042(ctx: DatabricksContext) -> ControlResult:
         return flag(note_data_missing(sh or expected_tab_label("09_Campaigns_Grouped_by_Amazon_"), "Campaign_Type/Perc_Spend"))
     rows = df[df[ctype].astype(str).str.strip().str.lower() == "sponsored brands"]
     if rows.empty:
-        return flag("Sponsored Brands row missing.")
+        return flag(obs("Sponsored Brands row is missing."))
     v = as_float(rows[pct].dropna().iloc[0]) if not rows[pct].dropna().empty else None
     if v is None:
-        return flag("Sponsored Brands spend pct missing.")
+        return flag(obs("Sponsored Brands spend share is missing."))
     v = _normalize_pct(v)
-    return flag(f"SB spend {v:.2f}% (<1% or >25%).") if (v < 1.0 or v > 25.0) else ok()
+    return flag(obs(f"Sponsored Brands spend share is outside the expected range at {v:.2f}%. Expected range is 1%–25%.")) if (v < 1.0 or v > 25.0) else ok()
 
 
 # ---- Removed ----
@@ -1204,7 +1170,7 @@ def _eval_optional_spend_share_cap(ctx: DatabricksContext, row_label: str, cap: 
     if v is None:
         return ok()
     v = _normalize_pct(v)
-    return flag(f"{row_label} spend {v:.2f}% (> {cap:.0f}%).") if (v < 0.0 or v > cap) else ok()
+    return flag(obs(f"{row_label} spend share is too high at {v:.2f}%, above the {cap:.0f}% cap.")) if (v < 0.0 or v > cap) else ok()
 
 
 def eval_C045(ctx: DatabricksContext) -> ControlResult:
@@ -1235,9 +1201,9 @@ def eval_C047(ctx: DatabricksContext) -> ControlResult:
     sd_spt = int(as_int(rows[campaigns].dropna().iloc[0]) or 0) if not rows.empty else 0
 
     if sd_spt == 0:
-        return flag("No SD_SPT campaigns.")
+        return flag(obs("No SD_SPT campaigns were found."))
     if req > 0 and sd_spt < req:
-        return partial(f"SD_SPT campaigns ({sd_spt}) < required categories ({req}).")
+        return partial(obs(f"SD_SPT campaign coverage is below target. There are {sd_spt} campaigns versus {req} required categories."))
     return ok()
 
 
@@ -1257,7 +1223,7 @@ def eval_C048(ctx: DatabricksContext) -> ControlResult:
     if v is None:
         return ok()
     v = _normalize_pct(v)
-    return flag(f"VCPM spend share {v:.2f}% (>10%).") if v > 10.0 else ok()
+    return flag(obs(f"VCPM spend share is too high at {v:.2f}%, above the 10% threshold.")) if v > 10.0 else ok()
 
 
 # ---- SD VCPM sales share ----
@@ -1288,7 +1254,7 @@ def eval_C049(ctx: DatabricksContext) -> ControlResult:
         return ok()
 
     share = (v / total) * 100.0
-    return flag(f"VCPM sales share {share:.2f}% (>20%).") if share > 20.0 else ok()
+    return flag(obs(f"VCPM sales share is too high at {share:.2f}%, above the 20% threshold.")) if share > 20.0 else ok()
 
 
 # ---- Budget X Amount of Campaigns ----
@@ -1303,7 +1269,7 @@ def eval_C050(ctx: DatabricksContext) -> ControlResult:
 
     total_campaigns = df[campaigns_col].apply(as_int).fillna(0).sum()
     if total_campaigns <= 0:
-        return flag("No campaigns found (cannot compute).")
+        return flag(obs("No campaigns were found, so budget per campaign could not be calculated."))
 
     daily_budget = getattr(ctx, "daily_budget", None)
     if daily_budget is None:
@@ -1312,7 +1278,7 @@ def eval_C050(ctx: DatabricksContext) -> ControlResult:
     budget_per_campaign = float(daily_budget) / float(total_campaigns)
 
     if budget_per_campaign < 0.25 or budget_per_campaign > 10.0:
-        return flag(f"Budget per campaign {budget_per_campaign:.2f} (<0.25 or >10).")
+        return flag(obs(f"Budget per campaign is outside the acceptable range at {budget_per_campaign:.2f}. Expected range is 0.25 to 10.00."))
     return ok()
 
 
@@ -1331,12 +1297,12 @@ def eval_C051(ctx: DatabricksContext) -> ControlResult:
 
     uniq = sorted(set(dts.tolist()))
     if len(uniq) >= 3:
-        return flag(f"{len(uniq)} distinct OOB days (>=3).")
+        return flag(obs(f"The account was out of budget on {len(uniq)} distinct days, meeting the 3-day flag threshold."))
 
     if len(uniq) >= 2:
         for a, b in zip(uniq[:-1], uniq[1:]):
             if (b - a).days == 1:
-                return partial("2 consecutive OOB days.")
+                return partial(obs("The account was out of budget for 2 consecutive days."))
     return ok()
 
 
@@ -1485,6 +1451,5 @@ def evaluate_all(ctx: DatabricksContext) -> Dict[str, ControlResult]:
         try:
             results[cid] = fn(ctx)
         except Exception as e:
-            # never crash the agent; surface as FLAG with exception note
             results[cid] = ControlResult(cfg.STATUS_FLAG, f"EXCEPTION in {cid}: {type(e).__name__}: {e}")
     return results

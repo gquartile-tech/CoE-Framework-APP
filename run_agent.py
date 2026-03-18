@@ -76,16 +76,14 @@ def _write_output_metadata(artifact: dict[str, Any], out_dir: Path = OUT_DIR) ->
     return meta_path
 
 
-def _print_runtime_error(stage: str, reason: str, export_path: str | None, daily_budget: Any) -> None:
+def _print_runtime_error(stage: str, reason: str, export_path: str | None) -> None:
     export_name = Path(export_path).name if export_path else "missing"
-    budget_value = daily_budget if daily_budget is not None else "missing"
 
     print("ERROR: Evaluation workflow failed before output generation.")
     print(f"Stage: {stage}")
     print(f"Reason: {reason}")
     print("Inputs received:")
     print(f"- Export file: {export_name}")
-    print(f"- Daily budget: {budget_value}")
     print("")
     print("No output file was generated.")
 
@@ -102,17 +100,10 @@ def main() -> int:
         required=True,
         help="Frozen template .xlsm",
     )
-    ap.add_argument(
-        "--daily_budget",
-        required=True,
-        type=float,
-        help="Account Daily Budget (number). Required for C050.",
-    )
     args = ap.parse_args()
 
     export_path = args.export
     template_path = args.template
-    daily_budget = float(args.daily_budget)
 
     try:
         if not os.path.exists(export_path):
@@ -127,7 +118,6 @@ def main() -> int:
         # --------------------------------------------------------------
         stage = "reader"
         ctx = load_databricks_export(export_path)
-        ctx.daily_budget = daily_budget
 
         hash_name = getattr(ctx, "hash_name", "") or getattr(ctx, "account_name", "") or "UNKNOWN_ACCOUNT"
         safe_hash = _safe_filename(hash_name)
@@ -199,7 +189,6 @@ def main() -> int:
         print(f"Window: {getattr(ctx, 'window_str', '')}")
         print(f"Ref date: {getattr(ctx, 'ref_date', '')}")
         print(f"Downloaded: {getattr(ctx, 'downloaded_dt', '')}")
-        print(f"DailyBudget used: {ctx.daily_budget}")
         print(f"Meta: {meta}")
         print(f"Framework_Analysis!A1: {a1}")
         print(f"Framework_Analysis!B3: {b3}")
@@ -217,7 +206,6 @@ def main() -> int:
             stage=stage_name,
             reason=str(e),
             export_path=export_path,
-            daily_budget=daily_budget,
         )
         return 1
 

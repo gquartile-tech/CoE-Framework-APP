@@ -28,11 +28,10 @@ def _safe_fn(name):
     name = re.sub(r'\s+', ' ', name).strip()
     return name or "UNKNOWN_ACCOUNT"
 
-def run_full_analysis(input_path, daily_budget):
+def run_full_analysis(input_path):
     if not TEMPLATE_FILE.exists():
         raise FileNotFoundError(f"Template not found: {TEMPLATE_FILE}")
     ctx = load_databricks_export(input_path)
-    ctx.daily_budget = daily_budget
     hash_name = getattr(ctx, "hash_name", "") or getattr(ctx, "account_name", "") or "UNKNOWN_ACCOUNT"
     safe_hash = _safe_fn(hash_name)
     results = evaluate_all(ctx)
@@ -50,7 +49,6 @@ def run_full_analysis(input_path, daily_budget):
         "window":      getattr(ctx, "window_str", ""),
         "ref_date":    str(getattr(ctx, "ref_date", "") or ""),
         "downloaded":  str(getattr(ctx, "downloaded_dt", "") or ""),
-        "daily_budget": daily_budget,
         "ok":      sum(1 for r in results.values() if r.status == "OK"),
         "flag":    sum(1 for r in results.values() if r.status == "FLAG"),
         "partial": sum(1 for r in results.values() if r.status == "PARTIAL"),
@@ -68,15 +66,10 @@ def analyze():
     if not f.filename: return jsonify({"error": "No file selected."}), 400
     _, ext = os.path.splitext(f.filename.lower())
     if ext not in {".xlsx", ".xlsm"}: return jsonify({"error": "Only .xlsx or .xlsm accepted."}), 400
-    try:
-        budget = float(request.form.get("daily_budget", "0"))
-        if budget <= 0: raise ValueError
-    except ValueError:
-        return jsonify({"error": "Enter a valid Daily Budget (number > 0)."}), 400
     ipath = str(UPLOAD_DIR / secure_filename(f.filename))
     f.save(ipath)
     try:
-        info = run_full_analysis(ipath, budget)
+        info = run_full_analysis(ipath)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Analysis failed: {e}"}), 500

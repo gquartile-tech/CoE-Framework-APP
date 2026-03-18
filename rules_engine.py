@@ -378,11 +378,51 @@ def eval_C005(ctx: DatabricksContext) -> ControlResult:
 
 # ---- C006/C007: Presence-based ACoS overrides ----
 def eval_C006(ctx: DatabricksContext) -> ControlResult:
-    return any_rows(ctx, "PRODUCT_LEVEL_ACOS", "34_Product_Level_ACoS", no_data_ok=True)
+    """Product-level ACoS overrides: FLAG if any row present. Show ASIN + ACoS value."""
+    sh, df = ds(ctx, "PRODUCT_LEVEL_ACOS", "34_Product_Level_ACoS")
+    if df is None or df.empty:
+        return ok()
+
+    asin_col = find_col(df, ["child_product", "asin", "product"])
+    acos_col = find_col(df, ["acos_percent", "acos"])
+    n = len(df)
+
+    if asin_col and acos_col:
+        items = []
+        for _, row in df.head(3).iterrows():
+            asin = _clean_cell_to_str(row[asin_col])
+            acos_val = as_float(row[acos_col])
+            if asin and acos_val is not None:
+                items.append(f"{asin} @ {acos_val:.0f}%")
+        if items:
+            suffix = f" (showing first {len(items)})" if n > 3 else ""
+            return flag(obs(f"{n} product-level ACoS override(s) detected{suffix}: {', '.join(items)}."))
+
+    return flag(obs(f"{n} product-level ACoS override(s) detected. Product-level targets override account governance."))
 
 
 def eval_C007(ctx: DatabricksContext) -> ControlResult:
-    return any_rows(ctx, "CAMPAIGN_LEVEL_ACOS", "35_Campaign_Level_ACoS", no_data_ok=True)
+    """Campaign-level ACoS overrides: FLAG if any row present. Show campaign name + ACoS value."""
+    sh, df = ds(ctx, "CAMPAIGN_LEVEL_ACOS", "35_Campaign_Level_ACoS")
+    if df is None or df.empty:
+        return ok()
+
+    camp_col = find_col(df, ["campaign_name", "campaignname", "campaign"])
+    acos_col = find_col(df, ["acos_percent", "acos"])
+    n = len(df)
+
+    if camp_col and acos_col:
+        items = []
+        for _, row in df.head(3).iterrows():
+            name = _clean_cell_to_str(row[camp_col])
+            acos_val = as_float(row[acos_col])
+            if name and acos_val is not None:
+                items.append(f"{name} @ {acos_val:.0f}%")
+        if items:
+            suffix = f" (showing first {len(items)})" if n > 3 else ""
+            return flag(obs(f"{n} campaign-level ACoS override(s) detected{suffix}: {', '.join(items)}."))
+
+    return flag(obs(f"{n} campaign-level ACoS override(s) detected. Campaign overrides create inconsistent governance."))
 
 
 # ---- C008: Timeframe Boost ----
@@ -403,7 +443,23 @@ def eval_C008(ctx: DatabricksContext) -> ControlResult:
         return ok()
 
     if (tmp["_status"] != "expired").any():
-        n = int((tmp["_status"] != "expired").sum())
+        active_rows = tmp[tmp["_status"] != "expired"].copy()
+        n = len(active_rows)
+        asin_col = find_col(active_rows, ["asin"])
+        end_col = find_col(active_rows, ["enddate", "end_date", "EndDate"])
+        items = []
+        for _, row in active_rows.head(3).iterrows():
+            asin = _clean_cell_to_str(row[asin_col]) if asin_col else ""
+            end = ""
+            if end_col:
+                end_val = pd.to_datetime(row[end_col], errors="coerce")
+                if not pd.isna(end_val):
+                    end = f" ends {end_val.strftime('%Y-%m-%d')}"
+            if asin:
+                items.append(f"{asin}{end}")
+        if items:
+            suffix = f" (showing first {len(items)})" if n > 3 else ""
+            return flag(obs(f"{n} timeframe boost(s) still active{suffix}: {', '.join(items)}."))
         return flag(obs(f"{n} timeframe boost row(s) are still active and not marked as expired."))
     return ok()
 
@@ -587,11 +643,21 @@ def eval_C014(ctx: DatabricksContext) -> ControlResult:
     if df.shape[1] < 5:
         return flag(note_data_missing(sh or expected_tab_label("26_Unmanaged_ASIN"), "Unmanaged_End_Date"))
     end_col = df.columns[4]
-    end_dates = pd.to_datetime(df[end_col], errors="coerce").dropna()
-    if end_dates.empty:
-        return flag(note_data_missing(sh or expected_tab_label("26_Unmanaged_ASIN"), "Unmanaged_End_Date"))
-    if bool((end_dates.dt.date > ctx.ref_date).any()):
-        n = int((end_dates.dt.date > ctx.ref_date).sum())
+    end_dates = pd.to_datetime(df[end_col], errors="coerce")
+    active_mask = end_dates > pd.Timestamp(ctx.ref_date)
+    if bool(active_mask.any()):
+        active = df[active_mask.values].copy()
+        n = len(active)
+        asin_col = find_col(active, ["asin", "child_product", "product"])
+        items = []
+        if asin_col:
+            for v in active[asin_col].dropna().head(3).tolist():
+                s = _clean_cell_to_str(v)
+                if s:
+                    items.append(s)
+        if items:
+            suffix = f" (showing first {len(items)})" if n > 3 else ""
+            return flag(obs(f"{n} unmanaged ASIN(s) still active{suffix}: {', '.join(items)}."))
         return flag(obs(f"{n} unmanaged ASIN row(s) have an end date after the reference date, so they are still active."))
     return ok()
 
@@ -605,11 +671,21 @@ def eval_C015(ctx: DatabricksContext) -> ControlResult:
     if df.shape[1] < 7:
         return flag(note_data_missing(sh or expected_tab_label("28_Unmanaged_Budget"), "Unmanaged_End_Date"))
     end_col = df.columns[6]
-    end_dates = pd.to_datetime(df[end_col], errors="coerce").dropna()
-    if end_dates.empty:
-        return flag(note_data_missing(sh or expected_tab_label("28_Unmanaged_Budget"), "Unmanaged_End_Date"))
-    if bool((end_dates.dt.date > ctx.ref_date).any()):
-        n = int((end_dates.dt.date > ctx.ref_date).sum())
+    end_dates = pd.to_datetime(df[end_col], errors="coerce")
+    active_mask = end_dates > pd.Timestamp(ctx.ref_date)
+    if bool(active_mask.any()):
+        active = df[active_mask.values].copy()
+        n = len(active)
+        asin_col = find_col(active, ["asin", "child_product", "product"])
+        items = []
+        if asin_col:
+            for v in active[asin_col].dropna().head(3).tolist():
+                s = _clean_cell_to_str(v)
+                if s:
+                    items.append(s)
+        if items:
+            suffix = f" (showing first {len(items)})" if n > 3 else ""
+            return flag(obs(f"{n} unmanaged budget(s) still active{suffix}: {', '.join(items)}."))
         return flag(obs(f"{n} unmanaged budget row(s) have an end date after the reference date, so they are still active."))
     return ok()
 
@@ -623,11 +699,21 @@ def eval_C016(ctx: DatabricksContext) -> ControlResult:
     if df.shape[1] < 12:
         return flag(note_data_missing(sh or expected_tab_label("31_Unmanaged_campaigns"), "Unmanaged_End_Date"))
     end_col = df.columns[11]
-    end_dates = pd.to_datetime(df[end_col], errors="coerce").dropna()
-    if end_dates.empty:
-        return flag(note_data_missing(sh or expected_tab_label("31_Unmanaged_campaigns"), "Unmanaged_End_Date"))
-    if bool((end_dates.dt.date > ctx.ref_date).any()):
-        n = int((end_dates.dt.date > ctx.ref_date).sum())
+    end_dates = pd.to_datetime(df[end_col], errors="coerce")
+    active_mask = end_dates > pd.Timestamp(ctx.ref_date)
+    if bool(active_mask.any()):
+        active = df[active_mask.values].copy()
+        n = len(active)
+        camp_col = find_col(active, ["campaignname", "campaign_name", "campaign"])
+        items = []
+        if camp_col:
+            for v in active[camp_col].dropna().head(3).tolist():
+                s = _clean_cell_to_str(v)
+                if s:
+                    items.append(s)
+        if items:
+            suffix = f" (showing first {len(items)})" if n > 3 else ""
+            return flag(obs(f"{n} unmanaged campaign(s) still active{suffix}: {', '.join(items)}."))
         return flag(obs(f"{n} unmanaged campaign row(s) have an end date after the reference date, so they are still active."))
     return ok()
 
@@ -641,18 +727,33 @@ def eval_C017(ctx: DatabricksContext) -> ControlResult:
     if df.shape[1] < 7:
         return flag(note_data_missing(sh or expected_tab_label("32_Unmanaged_Campaigns_Budget_O"), "Unmanaged_End_Date"))
     end_col = df.columns[6]
-    end_dates = pd.to_datetime(df[end_col], errors="coerce").dropna()
-    if end_dates.empty:
-        return flag(note_data_missing(sh or expected_tab_label("32_Unmanaged_Campaigns_Budget_O"), "Unmanaged_End_Date"))
-    if bool((end_dates.dt.date > ctx.ref_date).any()):
-        n = int((end_dates.dt.date > ctx.ref_date).sum())
+    end_dates = pd.to_datetime(df[end_col], errors="coerce")
+    active_mask = end_dates > pd.Timestamp(ctx.ref_date)
+    if bool(active_mask.any()):
+        active = df[active_mask.values].copy()
+        n = len(active)
+        camp_col = find_col(active, ["campaignname", "campaign_name", "campaign"])
+        items = []
+        if camp_col:
+            for v in active[camp_col].dropna().head(3).tolist():
+                s = _clean_cell_to_str(v)
+                if s:
+                    items.append(s)
+        if items:
+            suffix = f" (showing first {len(items)})" if n > 3 else ""
+            return flag(obs(f"{n} unmanaged campaign budget(s) still active{suffix}: {', '.join(items)}."))
         return flag(obs(f"{n} unmanaged campaign budget row(s) have an end date after the reference date, so they are still active."))
     return ok()
 
 
 # ---- C018: ARIS Manual Recommendations ----
 def eval_C018(ctx: DatabricksContext) -> ControlResult:
-    return any_rows(ctx, "ARIS_MANUAL_RECS", "41_ARIS__Manual_Recomendation", no_data_ok=True)
+    """FLAG if any ARIS manual recommendation rows exist. Show count."""
+    sh, df = ds(ctx, "ARIS_MANUAL_RECS", "41_ARIS__Manual_Recomendation")
+    if df is None or df.empty:
+        return ok()
+    n = len(df)
+    return flag(obs(f"{n} ARIS manual recommendation(s) detected. Manual SP expansion breaks one-on-one governance."))
 
 
 # ---- C019/C020/C021: Portfolio threshold controls ----

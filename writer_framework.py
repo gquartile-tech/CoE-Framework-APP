@@ -9,7 +9,8 @@ OK = "OK"
 FLAG = "FLAG"
 PARTIAL = "PARTIAL"
 
-MANUAL_CONTROLS = {"C052", "C053", "C054"}
+# C048 is the only manual control (Cleanup & Relaunch Cadence)
+MANUAL_CONTROLS = {"C048"}
 
 
 def _safe_str(x) -> str:

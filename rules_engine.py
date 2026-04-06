@@ -854,22 +854,22 @@ def eval_C027(ctx: DatabricksContext) -> ControlResult:
 
 
 def eval_C028(ctx: DatabricksContext) -> ControlResult:
-    sh, df, col, miss = seller_param_row7(ctx, "MktStreamHourlyBidAdjustments", "MktStreamHourlyBidAdjustments|mktstreamhourlybidadjustments|mkt_stream_hourly_bid_adjustments", no_data_flag=True)
+    sh, df, col, miss = seller_param_row7(ctx, "MktStreamHourlyBidAdjustments", "MktStreamHourlyBidAdjustments|mktstreamhourlybidadjustments|mkt_stream_hourly_bid_adjustments", no_data_flag=False)
     if miss:
         return miss
     b = as_bool(df.iloc[0][col])
     if b is None:
-        return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "MktStreamHourlyBidAdjustments"))
+        return ok()
     return ok() if b is True else flag(obs("MktStreamHourlyBidAdjustments is disabled, but it should be enabled."))
 
 
 def eval_C029(ctx: DatabricksContext) -> ControlResult:
-    sh, df, col, miss = seller_param_row7(ctx, "AutomaticallyImportCampaigns", "AutomaticallyImportCampaigns|automaticallyimportcampaigns|automatically_import_campaigns", no_data_flag=True)
+    sh, df, col, miss = seller_param_row7(ctx, "AutomaticallyImportCampaigns", "AutomaticallyImportCampaigns|automaticallyimportcampaigns|automatically_import_campaigns", no_data_flag=False)
     if miss:
         return miss
     b = as_bool(df.iloc[0][col])
     if b is None:
-        return flag(note_data_missing(sh or expected_tab_label("40_Seller_Parameter_Insights_Da"), "AutomaticallyImportCampaigns"))
+        return ok()
     return flag(obs("AutomaticallyImportCampaigns is enabled, but it should be disabled.")) if b is True else ok()
 
 

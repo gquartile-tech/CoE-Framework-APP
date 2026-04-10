@@ -1126,36 +1126,50 @@ def eval_C037(ctx: DatabricksContext) -> ControlResult:
 def eval_C038(ctx: DatabricksContext) -> ControlResult:
     """
     Checks ASINs with <1.5 orders/day that have ATM spend active.
-    % = such ASINs / total ASINs in tab 14.
-    >20% → FLAG, 10-20% → PARTIAL, <10% → OK.
+    Uses locked column positions from 14_Campaign_Performance_by_Adve:
+      - Col D (index 3)  = ASIN
+      - Col G (index 6)  = Orders
+      - Col AI (index 34) = ATM_Spend
+
+    Orders/day = Orders / window_days (defaults to 30 if not set on context).
+    % = affected ASINs / total ASINs in tab.
+    >20% → FLAG, 10–20% → PARTIAL, <10% → OK.
+    If any locked column is out of range, falls back to name-based lookup.
     """
-    sh, df = ds(ctx, "CAMPAIGN_PERF", "14_Campaign_Performance_by_Adve")
+    TAB = "14_Campaign_Performance_by_Adve"
+    sh, df = ds(ctx, "CAMPAIGN_PERF", TAB)
     if df is None or df.empty:
         return ok()
 
-    asin = find_col(df, ["asin"])
-    orders = find_col(df, ["orders", "purchases"])
-    atm_spend = find_col(df, ["atm_spend", "atm spend", "atmspend", "atm"])
+    # --- Locked column resolution with name-based fallback ---
+    def _col_by_index_or_name(idx: int, name_candidates: List[str]) -> Optional[str]:
+        if idx < len(df.columns):
+            return df.columns[idx]
+        return find_col(df, name_candidates)
 
-    if not asin or not orders or not atm_spend:
-        return ok()
+    asin_col    = _col_by_index_or_name(3,  ["asin"])
+    orders_col  = _col_by_index_or_name(6,  ["orders", "purchases"])
+    atm_col     = _col_by_index_or_name(34, ["atm_spend", "ATM_Spend", "atm spend", "atmspend"])
+
+    if not asin_col or not orders_col or not atm_col:
+        return flag(note_data_missing(sh or expected_tab_label(TAB), "ASIN (col D) / Orders (col G) / ATM_Spend (col AI)"))
 
     days = getattr(ctx, "window_days", None) or 30
 
     tmp = df.copy()
-    tmp["_asin"] = tmp[asin].astype(str).fillna("").str.strip()
-    tmp = tmp[tmp["_asin"] != ""].copy()
+    tmp["_asin"] = tmp[asin_col].astype(str).str.strip()
+    tmp = tmp[tmp["_asin"].str.len() > 0].copy()
     if tmp.empty:
         return ok()
 
     total_asins = len(tmp)
 
-    tmp["_orders"] = tmp[orders].apply(as_float).fillna(0.0)
+    tmp["_orders"]       = tmp[orders_col].apply(as_float).fillna(0.0)
     tmp["_orders_per_day"] = tmp["_orders"] / float(days)
-    tmp["_atm"] = tmp[atm_spend].apply(as_float).fillna(0.0)
+    tmp["_atm"]          = tmp[atm_col].apply(as_float).fillna(0.0)
 
     # ASINs with <1.5 orders/day that still have ATM spend active
-    cond = (tmp["_orders_per_day"] < 1.5) & (tmp["_atm"] > 0.0)
+    cond     = (tmp["_orders_per_day"] < 1.5) & (tmp["_atm"] > 0.0)
     affected = int(cond.sum())
 
     if total_asins == 0 or affected == 0:
@@ -1164,9 +1178,15 @@ def eval_C038(ctx: DatabricksContext) -> ControlResult:
     pct = (affected / total_asins) * 100.0
 
     if pct > 20.0:
-        return flag(obs(f"{affected} of {total_asins} ASINs ({pct:.1f}%) with fewer than 1.5 orders per day have ATM spend active, above the 20% threshold."))
+        return flag(obs(
+            f"{affected} of {total_asins} ASINs ({pct:.1f}%) have ATM spend active "
+            f"with fewer than 1.5 orders/day, above the 20% FLAG threshold."
+        ))
     if pct >= 10.0:
-        return partial(obs(f"{affected} of {total_asins} ASINs ({pct:.1f}%) with fewer than 1.5 orders per day have ATM spend active, between the 10%–20% caution range."))
+        return partial(obs(
+            f"{affected} of {total_asins} ASINs ({pct:.1f}%) have ATM spend active "
+            f"with fewer than 1.5 orders/day, between the 10%–20% caution range."
+        ))
     return ok()
 
 

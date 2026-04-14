@@ -573,6 +573,9 @@ def eval_C011(ctx: DatabricksContext) -> ControlResult:
     if not tag_cols:
         return flag(note_data_missing(sh or expected_tab_label("14_Campaign_Performance_by_Adve"), "Tag1-Tag5"))
 
+    # Exclude SB aggregation rows — these are not taggable ASINs
+    df = df[df[asin_col].astype(str).str.strip().str.upper() != "SB"].copy()
+
     active = [c for c in tag_cols if (df[c].astype(str).fillna("").str.strip() != "").any()]
 
     tag1_col = find_col(df, ["tag1"])

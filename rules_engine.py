@@ -551,6 +551,9 @@ def eval_C011(ctx: DatabricksContext) -> ControlResult:
     if not tag_cols:
         return flag(note_data_missing(sh or expected_tab_label("14_Campaign_Performance_by_Adve"), "Tag1-Tag5"), WHY)
 
+    # Exclude SB aggregation rows — these are not taggable ASINs
+    df = df[df[asin_col].astype(str).str.strip().str.upper() != "SB"].copy()
+
     active = [c for c in tag_cols if (df[c].astype(str).fillna("").str.strip() != "").any()]
 
     tag1_col = find_col(df, ["tag1"])
@@ -1130,14 +1133,24 @@ def eval_C038(ctx: DatabricksContext) -> ControlResult:
     WHY = "ASINs with fewer than 1.5 orders per day should not have ATM spend. Spending ATM budget on low-velocity products wastes resources that should go to better-performing ASINs."
     sh, df = ds(ctx, "CAMPAIGN_PERF", "14_Campaign_Performance_by_Adve")
     if df is None or df.empty:
-        return ok("No campaign performance data found — ATM catalog check skipped.", WHY)
+        return flag("Campaign performance data (14_Campaign_Performance_by_Adve) is missing — ATM catalog check cannot be evaluated.", WHY)
 
-    asin = find_col(df, ["asin"])
-    orders = find_col(df, ["orders", "purchases"])
-    atm_spend = find_col(df, ["atm_spend", "atm spend", "atmspend", "atm"])
+    # Locked positional resolution: D=index 3 (ASINs), G=index 6 (Orders), AI=index 34 (ATM Spend)
+    def col_by_pos(dataframe, idx, fallback_names):
+        if idx < len(dataframe.columns):
+            return dataframe.columns[idx]
+        return find_col(dataframe, fallback_names)
 
-    if not asin or not orders or not atm_spend:
-        return ok("Required columns not found — ATM catalog check skipped.", WHY)
+    asin      = col_by_pos(df, 3,  ["asin"])
+    orders    = col_by_pos(df, 6,  ["orders", "purchases"])
+    atm_spend = col_by_pos(df, 34, ["atm_spend", "atm_spend_14d", "atm spend"])
+
+    if not asin:
+        return flag("ASIN column (expected column D, index 3) not found in 14_Campaign_Performance_by_Adve — ATM catalog check cannot be evaluated.", WHY)
+    if not orders:
+        return flag("Orders column (expected column G, index 6) not found in 14_Campaign_Performance_by_Adve — ATM catalog check cannot be evaluated.", WHY)
+    if not atm_spend:
+        return flag("ATM Spend column (expected column AI, index 34) not found in 14_Campaign_Performance_by_Adve — ATM catalog check cannot be evaluated.", WHY)
 
     days = getattr(ctx, "window_days", None) or 30
 

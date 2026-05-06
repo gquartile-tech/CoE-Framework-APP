@@ -1016,7 +1016,7 @@ def eval_C036(ctx: DatabricksContext) -> ControlResult:
         cname = get_col_by_letter(df08, "B")
     catchall = False
     if cname:
-        pat = re.compile(r"(catch[\s\-]?all|un_watm_)", re.IGNORECASE)
+        pat = re.compile(r"(catch[\s\-_]?all|un[\s_]?watm)", re.IGNORECASE)
         catchall = df08[cname].astype(str).apply(lambda s: bool(pat.search(s))).any()
 
     required = True
